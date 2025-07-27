@@ -1,0 +1,18 @@
+[
+    {
+        "hardware": "NVIDIA_A100",
+        "tp_size": 8
+    },
+    {
+        "hardware": "NVIDIA_A100",
+        "tp_size": 8
+    },
+    {
+        "hardware": "NVIDIA_A100",
+        "tp_size": 8
+    },
+    {
+        "hardware": "NVIDIA_A100",
+        "tp_size": 8
+    }
+]

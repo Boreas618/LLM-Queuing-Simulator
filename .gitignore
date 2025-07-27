@@ -1,0 +1,10 @@
+events.log
+__pycache__
+debug.txt
+*.csv
+.DS_Store
+*.pkl
+*.png
+*.log
+*.log.*
+.vscode

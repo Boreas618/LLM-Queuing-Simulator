@@ -1,0 +1,15 @@
+hardware_params = {
+    "NVIDIA_V100": {"bandwidth": 900e9, "FP16": 112e12, "INT8": 62e12, "onchip_buffer": 20480e3, "mem": 32e9},
+    "NVIDIA_A6000": {"bandwidth": 768e9, "FP16": 154.8e12, "INT8": 309.7e12, "onchip_buffer": 21504e3, "mem": 48e9},
+    "NVIDIA_A6000_Ada": {"bandwidth": 960e9, "FP16": 364.2e12, "INT8": 728.5e12, "onchip_buffer": 36352e3, "mem": 48e9},
+    "NVIDIA_A100_40G": {"bandwidth": 1555e9, "FP16": 312e12, "INT8": 624e12, "onchip_buffer": 27648e3, "mem": 40e9},
+    "NVIDIA_A100_80G": {"bandwidth": 2039e9, "FP16": 312e12, "INT8": 624e12, "onchip_buffer": 27648e3, "mem": 80e9},
+    "NVIDIA_A800_80G_SXM": {"bandwidth": 2039e9, "FP16": 312e12, "INT8": 624e12, "onchip_buffer": 27648e3, "mem": 80e9},
+    "NVIDIA_A40": {"bandwidth": 696e9, "FP16": 149.7e12, "INT8": 299.3e12, "onchip_buffer": 21504e3, "mem": 48e9},
+    "NVIDIA_H100_SXM": {"bandwidth": 3072e9, "FP16": 1979e12 / 2, "INT8": 3958e12 / 2, "onchip_buffer": 33792e3, "mem": 80e9},
+    "NVIDIA_H100_PCIe": {"bandwidth": 2048e9, "FP16": 1513e12 / 2, "INT8": 3026e12 / 2, "onchip_buffer": 29184e3, "mem": 80e9},
+    "NVIDIA_L40": {"bandwidth": 864e9, "FP16": 181e12, "INT8": 362e12, "onchip_buffer": 36352e3, "mem": 48e9},
+    "NVIDIA_L40S": {"bandwidth": 864e9, "FP16": 362e12, "INT8": 733e12, "onchip_buffer": 36352e3, "mem": 48e9},
+    "NVIDIA_3090": {"bandwidth": 936e9, "FP16": 35.6e12, "INT8": 284e12, "onchip_buffer": 20992e3, "mem": 24e9},
+    "NVIDIA_4090": {"bandwidth": 1008e9, "FP16": 330.3e12, "INT8": 660.6e12, "onchip_buffer": 32768e3, "mem": 24e9},
+}
