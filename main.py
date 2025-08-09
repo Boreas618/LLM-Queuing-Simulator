@@ -93,7 +93,7 @@ def parse_args():
     parser.add_argument(
         "--trace_path",
         type=str,
-        default="conversation_trace.jsonl",
+        default="traces/conversation_trace.jsonl",
         help="Path to the Mooncake trace file (JSON Lines format). Used only if request_source is 'mooncake'."
     )
     parser.add_argument(

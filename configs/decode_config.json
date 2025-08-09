@@ -1,18 +1,18 @@
 [
     {
-        "hardware": "NVIDIA_A100",
+        "hardware": "NVIDIA_A100_40G",
         "tp_size": 8
     },
     {
-        "hardware": "NVIDIA_A100",
+        "hardware": "NVIDIA_A100_40G",
         "tp_size": 8
     },
     {
-        "hardware": "NVIDIA_A100",
+        "hardware": "NVIDIA_A100_40G",
         "tp_size": 8
     },
     {
-        "hardware": "NVIDIA_A100",
+        "hardware": "NVIDIA_A100_40G",
         "tp_size": 8
     }
 ]

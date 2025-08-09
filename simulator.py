@@ -9,6 +9,12 @@ from req import Request
 import logging
 from tqdm import tqdm
 from configs.hardware_params import hardware_params
+from enum import Enum, auto
+
+
+class RequestStage(Enum):
+    PREFILL = auto()
+    DECODE = auto()
 
 
 @dataclass(slots=True)
@@ -101,11 +107,11 @@ class Simulator:
         self.queue_states: List[QueueState] = []
         self.memory_usage_samples: List[MemoryUsageSample] = []
 
-        from scheduler import Coordinator
+        from coordinator import Coordinator
         self.coordinator = Coordinator(
             prefill_local, prefill_global, decode_local, decode_global, ttft_slo, tpot_slo, self)
 
-        from profiling import ModelAnalyzer
+        from profiler import ModelAnalyzer
         self.analyzer = ModelAnalyzer(self.model_config.model_id)
 
         # event-queue : (time, type, payload)
