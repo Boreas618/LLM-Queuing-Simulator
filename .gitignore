@@ -8,3 +8,5 @@ debug.txt
 *.log
 *.log.*
 .vscode
+CLAUDE.md
+.claude

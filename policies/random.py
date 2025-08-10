@@ -1,7 +1,8 @@
-from .base import LocalPolicy, GlobalPolicy, LocalSchedContext, GlobalSchedContext
+from .base import LocalPolicy, GlobalPolicy
 from typing import List
 from req import Request
 import random
+from simulator import SchedContext
 
 
 class LocalRandomPolicy(LocalPolicy):
@@ -11,7 +12,7 @@ class LocalRandomPolicy(LocalPolicy):
         super().__init__()
         self.rng = random.Random()
 
-    def schedule(self, queue: List[Request], context: LocalSchedContext) -> int:
+    def schedule(self, queue: List[Request], context: SchedContext) -> int:
         return self.rng.randrange(len(queue))
 
 
@@ -22,6 +23,6 @@ class GlobalRandomPolicy(GlobalPolicy):
         super().__init__()
         self.rng = random.Random()
 
-    def schedule(self, context: GlobalSchedContext):
+    def schedule(self, _: Request, context: SchedContext):
         instances = context.instances()
         return self.rng.randrange(len(instances))

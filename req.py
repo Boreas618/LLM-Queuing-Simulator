@@ -3,6 +3,14 @@ from typing import List, Optional, Iterable, Dict
 import pandas as pd
 from dataclasses import dataclass
 import json
+from enum import Enum, auto
+
+
+class RequestState(Enum):
+    PREFILL_GLOBAL = auto()
+    PREFILL_LOCAL = auto()
+    DECODE_GLOBAL = auto()
+    DECODE_LOCAL = auto()
 
 
 @dataclass(slots=True)
@@ -19,7 +27,20 @@ class Request:
     decode_start: float | None = None
     decode_finish: float | None = None
     decode_steps: int = 0
-    instance: int | None = None
+    prefill_instance: int | None = None
+    decode_instance: int | None = None
+
+    def state(self):
+        if self.prefill_instance is None:
+            return RequestState.PREFILL_GLOBAL
+        elif self.prefill_instance is not None and self.prefill_time is None:
+            return RequestState.PREFILL_LOCAL
+        elif self.kv_transmission_finish is not None and self.decode_instance is None:
+            return RequestState.DECODE_GLOBAL
+        elif self.decode_instance is not None and self.decode_start is None:
+            return RequestState.DECODE_LOCAL
+        else:
+            raise RuntimeError("Invalid State")
 
 
 class RequestFactory:

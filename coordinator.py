@@ -1,13 +1,11 @@
-from math import log
-import random
-from simulator import Simulator, ModelInstance
-from typing import Callable, List, Optional, Tuple, Dict
-import itertools
+from simulator import Simulator
+from typing import List, Dict
 import importlib
 import inspect
 from pathlib import Path
-from policies.base import Policy, LocalPolicy, GlobalPolicy
+from policies.base import Policy, LocalPolicy, GlobalPolicy, SchedContext
 import logging
+from req import Request
 
 
 class Coordinator:
@@ -22,8 +20,7 @@ class Coordinator:
         self.tpot_slo = tpot_slo
         self.sim = sim
 
-        self.policies: Dict[str, LocalPolicy |
-                            GlobalPolicy] = self._load_plugin()
+        self.policies: Dict[str, Policy] = self._load_plugin()
 
         self.prefill_global_scheduler = self.policies[self.prefill_global]()
         self.prefill_local_scheduler = self.policies[self.prefill_local]()
@@ -56,29 +53,23 @@ class Coordinator:
 
         return policies
 
-    def prefill_dispatch(self, t: float, length: Optional[int]):
-        # TODO: schedule with prefill_global_scheduler
-        return None
+    def prefill_dispatch(self, request: Request, context: SchedContext):
+        return self.prefill_global_scheduler.schedule(request, context)
 
-    def prefill_schedule(self, instance: ModelInstance, time: float):
-         # TODO: schedule with prefill_local_scheduler
-        return None
+    def prefill_schedule(self, queue: List[Request], context: SchedContext) -> Request:
+        index = self.prefill_local_scheduler.schedule(queue, context)
+        request = queue.pop(index)
+        return request
 
-    def decode_dispatch(self, t: float, length: Optional[int]):
-        # TODO: schedule with decode_global_scheduler
-        return None
+    def decode_dispatch(self, request: Request, context: SchedContext):
+        return self.decode_global_scheduler.schedule(request, context)
 
-    def decode_schedule(self, instance: ModelInstance, time: float):
-        queue = instance.queue
-
+    def decode_schedule(self, queue: List[Request], context: SchedContext):
         selected = []
-        while instance.memory_usage < instance.memory_limit and len(queue) > 0:
-            # TODO: schedule with decode_local_scheduler
-            selected.append(request_id)
-            instance.memory_usage += self.sim.requests[request_id].input_length * \
-                self.sim.per_token_kv_cache_size_byte
-
-        for req_id in queue:
-            self.decode_blocking_tbl[req_id][1].extend(selected)
-
+        while context.current_instance.memory_usage < context.current_instance.memory_limit and len(queue) > 0:
+            index = self.decode_local_scheduler.schedule(queue, context)
+            selected.append(queue[index])
+            context.current_instance.memory_usage += queue[index].input_length * \
+                context.model_config.per_token_kv_cache_size_byte
+            queue.pop(index)
         return selected

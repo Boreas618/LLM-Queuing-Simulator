@@ -1,5 +1,4 @@
 from __future__ import annotations
-import numpy as np
 from typing import List, Dict
 import logging
 from simulator import Simulator, ModelConfig
@@ -15,7 +14,7 @@ import json
 
 logging.basicConfig(
     filename='events.log',
-    level=logging.CRITICAL,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -79,7 +78,6 @@ def parse_args():
         type=str,
         nargs='+',
         choices=["fcfs"],
-        # TODO: are there any other options? Seems that other options are based on knowledge of decoding length.
         default=["fcfs"],
         help="Local decode scheduling strategies. Can specify multiple values."
     )
@@ -321,7 +319,7 @@ if __name__ == "__main__":
         decode_config = json.load(f)
 
     model_id = args.model_id
-    
+
     if args.resume:
         with open(args.checkpoint_path, 'rb') as f:
             all_results, raw_df_map = pickle.load(f)

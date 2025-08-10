@@ -1,12 +1,13 @@
 import itertools
 from typing import List, Dict, Any
+from simulator import SchedContext
 
 from pulp import (
     LpProblem, LpMaximize, LpVariable, LpBinary, LpStatus,
     lpSum, value, PULP_CBC_CMD
 )
 
-from .base import LocalPolicy, LocalSchedContext
+from .base import LocalPolicy, SchedContext
 from req import Request
 
 
@@ -115,12 +116,12 @@ class MILPPolicy(LocalPolicy):
             "finish_time": [finish for _, finish in solved_schedule],
         }
 
-    def schedule(self, queue: List[Request], context: LocalSchedContext) -> int:
+    def schedule(self, queue: List[Request], context: SchedContext) -> int:
         """
         Determines the next request to schedule from the queue.
         """
-        current_time = context.time()
-        slo = context.ttft_slo()
+        current_time = context.time
+        slo = context.ttft_slo
 
         # Filter for requests whose deadlines have not yet passed
         schedulable_reqs = [
