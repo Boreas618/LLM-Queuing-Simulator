@@ -1,6 +1,37 @@
-# LLM-Serving-Simulator
+# LLM-Queuing-Simulator
 
 LLM-Serving-Simulator is a comprehensive event-driven simulator that models the complete lifecycle of request handling in LLM serving systems. It simulates routing, queuing, prefill processing, KV cache transmission, and decoding phases with realistic performance characteristics and memory constraints.
+
+## Usage
+
+### Quick Start
+
+Run the simulator with the provided shell script:
+```bash
+./run.sh
+```
+
+### Full Command Line
+
+```bash
+python main.py \
+  --lambda_arrival 1.66 \
+  --prefill_global lowest_load \
+  --prefill_local shortest \
+  --decode_global round_robin \
+  --decode_local fcfs \
+  --request_source mooncake \
+  --trace_path traces/conversation_trace.jsonl \
+  --seed 2025 \
+  --ttft_slo 10.0 \
+  --tpot_slo 0.5 \
+  --sample_memory_usage \
+  --sample_rate 1.0 \
+  --queue_states_output queue_states.csv \
+  --n_jobs 10 \
+  --checkpoint_path results.pkl \
+  --resume
+```
 
 ## Architecture Overview
 
@@ -81,41 +112,10 @@ The simulator supports large-scale experimentation through:
 The simulator provides comprehensive metrics collection:
 
 - **Performance Metrics**: TTFT (Time to First Token), TPOT (Time Per Output Token), throughput
-- **SLO Compliance**: Tracks adherence to specified service level objectives
+- **SLO Attainment**: Tracks adherence to specified service level objectives
 - **Queue States**: Optional sampling of queue lengths and states over time
 - **Memory Usage**: Tracks memory consumption across decode instances
 - **Visualization**: Built-in plotting capabilities for analysis
-
-## Usage
-
-### Quick Start
-
-Run the simulator with the provided shell script:
-```bash
-./run.sh
-```
-
-### Full Command Line
-
-```bash
-python main.py \
-  --lambda_arrival 1.66 \
-  --prefill_global lowest_load \
-  --prefill_local shortest \
-  --decode_global round_robin \
-  --decode_local fcfs \
-  --request_source mooncake \
-  --trace_path traces/conversation_trace.jsonl \
-  --seed 2025 \
-  --ttft_slo 10.0 \
-  --tpot_slo 0.5 \
-  --sample_memory_usage \
-  --sample_rate 1.0 \
-  --queue_states_output queue_states.csv \
-  --n_jobs 10 \
-  --checkpoint_path results.pkl \
-  --resume
-```
 
 ### Key Parameters
 
