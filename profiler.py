@@ -3,6 +3,7 @@ import importlib
 from configs.hardware_params import hardware_params
 from transformers import AutoConfig
 import math
+from extension import ModelConfigLoader
 
 
 def str_number(num):
@@ -74,7 +75,7 @@ def roofline_analyze(bandwidth, max_ops, ops, memory_access):
     return arithmetic_intensity, performance, bound
 
 
-class ModelAnalyzer:
+class ModelProfiler:
     def __init__(self, model_id, config_file=None):
         """
         Initializes the model configuration.
@@ -82,33 +83,49 @@ class ModelAnalyzer:
         Args:
             model_id (str): The identifier of the model.
             config_file (str, optional): Path to the model configuration file.
-            source (str): Source of the model configuration. Options are 'huggingface' or custom module name (e.g., 'DiT').
         """
         self.model_id = model_id
-
-        # Auto-locate config file if not provided
-        if config_file is None:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            config_dir = os.path.join(current_dir, "configs")
-            matching_files = [
-                f for f in os.listdir(config_dir)
-                if f.endswith(".py") and f.replace(".py", "") in str.lower(model_id)
-            ]
-            if matching_files:
-                config_file = os.path.join("configs", matching_files[0])
-
-        if config_file is None:
-            raise FileNotFoundError(
-                "Config file not found. Please specify it manually.")
-        print(f"Using config file: {config_file} for model: {model_id}")
 
         # Load model parameters
         self.model_params = AutoConfig.from_pretrained(
             model_id, trust_remote_code=True)
 
-        # Import configuration module
-        config_module_path = config_file.replace("/", ".").replace(".py", "")
-        self.config = importlib.import_module(config_module_path)
+        # Use unified extension loader to find model configuration
+        config_loader = ModelConfigLoader()
+
+        if config_file is None:
+            # Auto-discover config using the unified loader
+            config_class = config_loader.find_model_config(model_id)
+            if config_class is None:
+                raise FileNotFoundError(
+                    f"No model configuration found for '{model_id}'. "
+                    f"Please specify config_file manually or add a config to the models/ directory.")
+            self.config = config_class(self.model_params)
+            print(
+                f"Auto-discovered config: {config_class.__name__} for model: {model_id}")
+        else:
+            # Load specific config file (legacy support)
+            config_module_path = config_file.replace(
+                "/", ".").replace(".py", "")
+            config_module = importlib.import_module(config_module_path)
+
+            # Check if module has a class-based config (preferred)
+            self.config = None
+            for attr_name in dir(config_module):
+                attr = getattr(config_module, attr_name)
+                if (isinstance(attr, type) and
+                    attr_name.endswith('Config') and
+                    not attr_name.startswith('Base') and
+                        hasattr(attr, 'get_num_attention_heads')):
+                    self.config = attr(self.model_params)
+                    break
+
+            # Fallback to function-based config for backward compatibility
+            if self.config is None:
+                self.config = config_module
+
+            print(
+                f"Using specified config file: {config_file} for model: {model_id}")
 
         # Temporary attributes
         self.results = None
@@ -118,7 +135,15 @@ class ModelAnalyzer:
         self.batch_size = None
         self.seqlen = None
 
-    def _analyze_to_results(
+    def _get_config_value(self, method_name, *args):
+        """Helper method to call configuration methods with both class and function-based configs."""
+        method = getattr(self.config, method_name)
+        if hasattr(self.config, 'model_params'):  # Class-based config
+            return method(*args)
+        else:  # Function-based config
+            return method(self.model_params, *args)
+
+    def _profile_to_results(
         self,
         hardware,
         stage,
@@ -199,12 +224,12 @@ class ModelAnalyzer:
                     )
                     f.write(row)
 
-    def _analyze_linear_layers(self, config, model_params, w_byte, a_byte, kv_byte, hardware):
-        for name, (ic, oc) in config.get_linear_layers(model_params, self.tp_size).items():
+    def _profile_linear_layers(self, config, model_params, w_byte, a_byte, kv_byte, hardware):
+        for name, (ic, oc) in self._get_config_value('get_linear_layers', self.tp_size).items():
             is_kv_proj = name in ["k_proj", "v_proj"]
             is_normal_proj = not is_kv_proj
 
-            self._analyze_to_results(hardware, "decode", name,
+            self._profile_to_results(hardware, "decode", name,
                                      ops=ic * oc * self.batch_size * 2,
                                      load_weight=ic * oc * w_byte,
                                      load_act=ic * self.batch_size * a_byte,
@@ -213,7 +238,7 @@ class ModelAnalyzer:
                                      store_kv_cache=0 if is_normal_proj else oc * self.batch_size * kv_byte,
                                      )
 
-            self._analyze_to_results(hardware, "prefill", name,
+            self._profile_to_results(hardware, "prefill", name,
                                      ops=ic * oc * self.batch_size * self.seqlen * 2,
                                      load_weight=ic * oc * w_byte,
                                      load_act=ic * self.batch_size * self.seqlen * a_byte,
@@ -223,7 +248,7 @@ class ModelAnalyzer:
                                      self.batch_size * self.seqlen * kv_byte,
                                      )
 
-    def _analyze_attention(self, head_size, num_heads, kv_heads, w_byte, a_byte, kv_byte, use_flash, hardware):
+    def _profile_attention(self, head_size, num_heads, kv_heads, w_byte, a_byte, kv_byte, use_flash, hardware):
         seqlen, bs = self.seqlen, self.batch_size
 
         for stage, is_prefill in [("decode", False), ("prefill", True)]:
@@ -244,7 +269,7 @@ class ModelAnalyzer:
                 q_bytes = seq1 * head_size * bs * num_heads * a_byte
                 o_bytes = seq1 * seq2 * bs * num_heads * a_byte
 
-                self._analyze_to_results(hardware, stage, name,
+                self._profile_to_results(hardware, stage, name,
                                          ops=qk_ops + sv_ops + softmax_ops,
                                          load_weight=0,
                                          load_act=q_bytes,
@@ -258,7 +283,7 @@ class ModelAnalyzer:
                     store_act = load_act
                     load_kv = seq2 * head_size * bs * kv_heads * kv_byte if "matmul" in name else 0
 
-                    self._analyze_to_results(hardware, stage, name,
+                    self._profile_to_results(hardware, stage, name,
                                              ops=ops,
                                              load_weight=0,
                                              load_act=load_act,
@@ -267,18 +292,18 @@ class ModelAnalyzer:
                                              store_kv_cache=0
                                              )
 
-    def _analyze_norm_and_misc(self, hidden_size, a_byte, hardware):
+    def _profile_norm_and_misc(self, hidden_size, a_byte, hardware):
         seqlen, bs = self.seqlen, self.batch_size
         for stage, seq in [("decode", 1), ("prefill", seqlen)]:
-            for name in self.config.get_norm_layers(self.model_params):
-                self._analyze_to_results(hardware, stage, name, ops=bs * hidden_size * seq * 7, load_weight=0, load_act=bs *
+            for name in self._get_config_value('get_norm_layers'):
+                self._profile_to_results(hardware, stage, name, ops=bs * hidden_size * seq * 7, load_weight=0, load_act=bs *
                                          hidden_size * seq * a_byte, store_act=bs * hidden_size * seq * a_byte, load_kv_cache=0, store_kv_cache=0)
 
             for name in ["attn_add", "mlp_add"]:
-                self._analyze_to_results(hardware, stage, name, ops=bs * hidden_size * seq, load_weight=0, load_act=bs *
+                self._profile_to_results(hardware, stage, name, ops=bs * hidden_size * seq, load_weight=0, load_act=bs *
                                          hidden_size * seq * a_byte, store_act=bs * hidden_size * seq * a_byte, load_kv_cache=0, store_kv_cache=0)
 
-            self._analyze_to_results(hardware, stage, "mlp_act", ops=bs * hidden_size * seq * 2, load_weight=0, load_act=bs *
+            self._profile_to_results(hardware, stage, "mlp_act", ops=bs * hidden_size * seq * 2, load_weight=0, load_act=bs *
                                      hidden_size * seq * a_byte * 2, store_act=bs * hidden_size * seq * a_byte, load_kv_cache=0, store_kv_cache=0)
 
     def _compute_totals(self, num_layers):
@@ -305,11 +330,11 @@ class ModelAnalyzer:
 
         self.results["total_results"] = total
 
-    def _analyze_lm_head(self, w_byte, a_byte, hardware):
+    def _profile_lm_head(self, w_byte, a_byte, hardware):
         args = {"batch_size": self.batch_size,
                 "a_byte": a_byte, "w_byte": w_byte}
-        for info in self.config.post_process(self.model_params, args):
-            self._analyze_to_results(
+        for info in self._get_config_value('post_process', args):
+            self._profile_to_results(
                 hardware,
                 info['stage'],
                 info['name'],
@@ -322,7 +347,7 @@ class ModelAnalyzer:
                 self.results["total_results"][info["stage"]
                                               ][key] += self.results[info["stage"]][info["name"]][key]
 
-    def analyze(
+    def profile(
         self,
         hardware,
         seqlen,
@@ -361,31 +386,31 @@ class ModelAnalyzer:
         config, model_params = self.config, self.model_params
 
         # TODO: support MLA
-        num_heads = config.get_num_attention_heads(model_params)
-        kv_heads = config.get_num_key_value_heads(model_params)
-        hidden_size = config.get_hidden_size(model_params)
-        num_layers = config.get_num_hidden_layers(model_params)
+        num_heads = self._get_config_value('get_num_attention_heads')
+        kv_heads = self._get_config_value('get_num_key_value_heads')
+        hidden_size = self._get_config_value('get_hidden_size')
+        num_layers = self._get_config_value('get_num_hidden_layers')
         head_size = hidden_size // num_heads
 
         # TODO: support MoE
-        self._analyze_linear_layers(
+        self._profile_linear_layers(
             config, model_params, w_byte, a_byte, kv_byte, hardware)
-        self._analyze_attention(
+        self._profile_attention(
             head_size, num_heads, kv_heads, w_byte, a_byte, kv_byte, use_flashattention, hardware
         )
-        self._analyze_norm_and_misc(hidden_size, a_byte, hardware)
+        self._profile_norm_and_misc(hidden_size, a_byte, hardware)
         self._compute_totals(num_layers)
-        self._analyze_lm_head(w_byte, a_byte, hardware)
+        self._profile_lm_head(w_byte, a_byte, hardware)
 
         return self.results
 
-    def analyze_prefill_iteration(self, hardware, sequence_length, batch_size,
+    def profile_prefill_iteration(self, hardware, sequence_length, batch_size,
                                   w_bit=16,
                                   a_bit=16,
                                   kv_bit=None,
                                   use_flashattention=False,
                                   tp_size: int = 1):
-        result = self.analyze(
+        result = self.profile(
             hardware,
             sequence_length,
             batch_size,
@@ -398,13 +423,13 @@ class ModelAnalyzer:
         prefill_time = result["total_results"]["prefill"]["inference_time"]
         return prefill_time
 
-    def analyze_decode_iteration(self, hardware, sequence_length, batch_size,
+    def profile_decode_iteration(self, hardware, sequence_length, batch_size,
                                  w_bit=16,
                                  a_bit=16,
                                  kv_bit=None,
                                  use_flashattention=False,
                                  tp_size: int = 1):
-        result = self.analyze(hardware, sequence_length, batch_size, w_bit, a_bit, kv_bit,
+        result = self.profile(hardware, sequence_length, batch_size, w_bit, a_bit, kv_bit,
                               use_flashattention=use_flashattention, tp_size=tp_size)
         decode_time = result["total_results"]["decode"]["inference_time"]
         return decode_time
@@ -419,9 +444,7 @@ class ModelAnalyzer:
         return bandwidth, max_ops, onchip_buffer
 
     def _get_model_info(self):
-        if self.config.get_num_attention_heads(self.model_params) != self.config.get_num_key_value_heads(
-            self.model_params
-        ):
+        if self._get_config_value('get_num_attention_heads') != self._get_config_value('get_num_key_value_heads'):
             GQA = True
         else:
             GQA = False
@@ -433,6 +456,6 @@ class ModelAnalyzer:
 if __name__ == "__main__":
     model_id = 'unsloth/Llama-3.3-70B-Instruct'
     hardware = 'NVIDIA_A100_40G'
-    result = ModelAnalyzer(model_id).analyze_generate_task(
+    result = ModelProfiler(model_id).analyze_generate_task(
         hardware, 2048, 1024, 8)
     print(result)

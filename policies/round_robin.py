@@ -1,7 +1,7 @@
 from .base import GlobalPolicy
 import itertools
-from simulator import SchedContext
-from req import Request, RequestState
+from simulator import DispatchContext
+from req import RequestState
 
 
 class GlobalRoundRobinPolicy(GlobalPolicy):
@@ -11,11 +11,15 @@ class GlobalRoundRobinPolicy(GlobalPolicy):
         super().__init__()
         self.counter = None
 
-    def schedule(self, _: Request, context: SchedContext):
-        if context.current_state == RequestState.PREFILL_GLOBAL:
-            instances = context.prefill_instances
-        elif context.current_state == RequestState.DECODE_GLOBAL:
-            instances = context.decode_instances
+    def schedule(self, context: DispatchContext) -> int:
+        request = context.request_to_dispatch
+        if request.state() == RequestState.PREFILL_GLOBAL:
+            instances = context.cluster_state.prefill_instances
+        elif request.state() == RequestState.DECODE_GLOBAL:
+            instances = context.cluster_state.decode_instances
+        else:
+            raise ValueError(
+                f"Round robin policy not applicable for request state: {request.state()}")
 
         if self.counter is None:
             self.counter = itertools.cycle(range(len(instances)))

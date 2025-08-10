@@ -1,8 +1,7 @@
 from .base import LocalPolicy, GlobalPolicy
-from typing import List
 from req import Request
 import random
-from simulator import SchedContext
+from simulator import SchedulingContext, DispatchContext
 
 
 class LocalRandomPolicy(LocalPolicy):
@@ -12,8 +11,10 @@ class LocalRandomPolicy(LocalPolicy):
         super().__init__()
         self.rng = random.Random()
 
-    def schedule(self, queue: List[Request], context: SchedContext) -> int:
-        return self.rng.randrange(len(queue))
+    def schedule(self, context: SchedulingContext) -> Request:
+        if not context.queue:
+            raise ValueError("Cannot schedule from empty queue")
+        return self.rng.choice(context.queue)
 
 
 class GlobalRandomPolicy(GlobalPolicy):
@@ -23,6 +24,10 @@ class GlobalRandomPolicy(GlobalPolicy):
         super().__init__()
         self.rng = random.Random()
 
-    def schedule(self, _: Request, context: SchedContext):
-        instances = context.instances()
+    def schedule(self, context: DispatchContext) -> int:
+        request = context.request_to_dispatch
+        if request.state().name.startswith('PREFILL'):
+            instances = context.cluster_state.prefill_instances
+        else:
+            instances = context.cluster_state.decode_instances
         return self.rng.randrange(len(instances))

@@ -1,12 +1,13 @@
 from .base import LocalPolicy
-from simulator import SchedContext
-from typing import List
 from req import Request
+from simulator import SchedulingContext
 
 
 class FCFSPolicy(LocalPolicy):
     identifier = 'fifo'
 
-    def schedule(self, queue: List[Request], _: SchedContext) -> int:
-        sorted(queue, key=lambda r: r.arrival)
-        return 0
+    def schedule(self, context: SchedulingContext) -> Request:
+        if not context.queue:
+            raise ValueError("Cannot schedule from empty queue")
+        sorted_queue = sorted(context.queue, key=lambda r: r.arrival)
+        return sorted_queue[0]

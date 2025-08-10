@@ -1,11 +1,12 @@
 from .base import LocalPolicy
-from typing import List
 from req import Request
-from simulator import SchedContext
+from simulator import SchedulingContext
 
 
 class ShortestPolicy(LocalPolicy):
     identifier = 'shortest'
 
-    def schedule(self, queue: List[Request], _: SchedContext) -> int:
-        return min(range(len(queue)), key=lambda i: queue[i].input_length)
+    def schedule(self, context: SchedulingContext) -> Request:
+        if not context.queue:
+            raise ValueError("Cannot schedule from empty queue")
+        return min(context.queue, key=lambda r: r.input_length)

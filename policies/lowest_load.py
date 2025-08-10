@@ -1,8 +1,8 @@
 from .base import GlobalPolicy
-from simulator import SchedContext
 from typing import List
 from simulator import ModelInstance
-from req import Request, RequestState
+from req import RequestState
+from simulator import DispatchContext
 
 
 class GlobalLowestLoadPolicy(GlobalPolicy):
@@ -18,14 +18,15 @@ class GlobalLowestLoadPolicy(GlobalPolicy):
             loads.append(running_remaining + queuing_time)
         return loads
 
-    def schedule(self, request: Request, context: SchedContext):
+    def schedule(self, context: DispatchContext) -> int:
+        request = context.request_to_dispatch
         if request.state() != RequestState.PREFILL_GLOBAL:
             raise NotImplementedError(
                 "lowest load policy only supports prefill stage now")
 
-        time = context.time
+        time = context.current_time
         length = request.input_length
-        instances = context.prefill_instances
+        instances = context.cluster_state.prefill_instances
 
         loads = self.compute_loads(time, length, instances)
         return min(enumerate(loads), key=lambda x: x[1])[0]

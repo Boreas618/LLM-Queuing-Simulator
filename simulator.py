@@ -4,109 +4,73 @@ import random
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from req import Request
 import logging
 from tqdm import tqdm
 from configs.hardware_params import hardware_params
 
 
-class EventIterator:
-    def __init__(self, context: SchedContext):
-        self.context = context
+@dataclass(frozen=True)  # frozen=True makes them immutable
+class BaseDecisionContext:
+    """Base context with universally available information."""
+    current_time: float
+    cluster_state: ClusterState
 
-    def __iter__(self):
+
+@dataclass(frozen=True)
+class DispatchContext(BaseDecisionContext):
+    """Context for assigning a request to an instance."""
+    request_to_dispatch: Request
+
+
+@dataclass(frozen=True)
+class SchedulingContext(BaseDecisionContext):
+    """Context for selecting a request from a queue."""
+    queue: Tuple[Request, ...]  # Use tuple for immutability
+    instance_id: int
+
+
+@dataclass
+class ClusterState:
+    """A read-only view of the cluster's state for scheduling policies."""
+    model_config: ModelConfig
+    prefill_instances: List[ModelInstance]
+    decode_instances: List[ModelInstance]
+    requests: Dict[int, Request]
+    ttft_slo: float
+    tpot_slo: float
+
+    def get_request(self, request_id: int) -> Request:
+        return self.requests[request_id]
+
+    def get_prefill_instance(self, instance_id: int) -> ModelInstance:
+        return self.prefill_instances[instance_id]
+
+    def get_decode_instance(self, instance_id: int) -> ModelInstance:
+        return self.decode_instances[instance_id]
+
+
+class EventBus:
+    """Manages the event queue and simulation time."""
+
+    def __init__(self, initial_events: List[Tuple[float, str, int]]):
+        self.events: List[Tuple[float, str, int]] = initial_events.copy()
+        heapq.heapify(self.events)
+        self.time: float = 0.0
+
+    def add_event(self, event: Tuple[float, str, int]) -> None:
+        heapq.heappush(self.events, event)
+
+    def __iter__(self) -> 'EventBus':
         return self
 
-    def __next__(self):
-        if len(self.context.events) == 0:
+    def __next__(self) -> Tuple[float, str, int]:
+        if not self.events:
             raise StopIteration
-        t, ev_type, payload = heapq.heappop(self.context.events)
-
-        self.context.set_time(t)
-
-        current_request = None
-        if ev_type == "arrival" or ev_type == "kv_transmission_finish":
-            current_request = self.context.requests[int(payload)]
-
-        current_instance = None
-        if ev_type == "prefill_finish":
-            current_instance = self.context.prefill_instances[int(payload)]
-        elif ev_type == "decode_step":
-            current_instance = self.context.decode_instances[int(payload)]
-
-        assert current_request is not None or current_instance is not None
-        self.context.set_current_event(current_request, current_instance)
-
-        return t, ev_type, payload
-
-
-class SchedContext:
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        prefill_config: List[Tuple],
-        decode_config: List[Tuple],
-        ttft_slo: float,
-        tpot_slo: float,
-        requests: List[Request]
-    ):
-        self.model_config = model_config
-        self.prefill_instances: List["ModelInstance"] = []
-        self.decode_instances: List["ModelInstance"] = []
-
-        for instance in prefill_config:
-            hardware = instance["hardware"]
-            tp_size = instance["tp_size"]
-            memory_limit = hardware_params[instance["hardware"]]["mem"] - \
-                self.model_config.model_size_byte / instance["tp_size"]
-            self.prefill_instances.append(
-                ModelInstance(hardware, tp_size, memory_limit)
-            )
-
-        for instance in decode_config:
-            hardware = instance["hardware"]
-            tp_size = instance["tp_size"]
-            memory_limit = hardware_params[instance["hardware"]]["mem"] - \
-                self.model_config.model_size_byte / instance["tp_size"]
-            self.decode_instances.append(
-                ModelInstance(hardware, tp_size, memory_limit)
-            )
-
-        for instance in self.prefill_instances:
-            assert instance.memory_limit > 0
-        for instance in self.decode_instances:
-            assert instance.memory_limit > 0
-
-        self.ttft_slo = ttft_slo
-        self.tpot_slo = tpot_slo
-        self.requests = requests
-
-        self.events: List[Tuple[float, str, int]] = [
-            (req.arrival, "arrival", req.idx) for req in self.requests
-        ]
-        heapq.heapify(self.events)
-
-        self.event_iterator = EventIterator(self)
-        self.time = 0.0
-        self.current_request = None
-        self.current_instance = None
-        self.current_state = None
-
-    def set_time(self, t: float):
+        t, ev_type, payload_id = heapq.heappop(self.events)
         self.time = t
-
-    def set_current_event(self, request, instance):
-        self.current_request = request
-        self.current_instance = instance
-        if self.current_request:
-            self.current_state = self.current_request.state()
-
-    def iter_events(self):
-        return self.event_iterator
-
-    def add_event(self, event: Tuple[float, str, int]):
-        self.events.append(event)
+        return t, ev_type, payload_id
 
 
 @dataclass(slots=True)
@@ -175,8 +139,14 @@ class Simulator:
         self.rng = random.Random(seed)
         np.random.seed(seed)
 
-        self.context = SchedContext(
+        # Initialize cluster state
+        self.cluster_state = self._initialize_cluster_state(
             model_config, prefill_config, decode_config, ttft_slo, tpot_slo, requests)
+
+        # Initialize simulation engine with arrival events
+        initial_events = [(req.arrival, "arrival", req.idx)
+                          for req in requests]
+        self.engine = EventBus(initial_events)
 
         self.sample_queue_states = sample_queue_states
         self.sample_memory_usage = sample_memory_usage
@@ -188,199 +158,253 @@ class Simulator:
         self.coordinator = Coordinator(
             prefill_local, prefill_global, decode_local, decode_global, ttft_slo, tpot_slo, self)
 
-        from profiler import ModelAnalyzer
-        self.analyzer = ModelAnalyzer(self.context.model_config.model_id)
+        from profiler import ModelProfiler
+        self.analyzer = ModelProfiler(self.cluster_state.model_config.model_id)
 
-        # Progress tracking
         self.max_decode_finished_id = 0
         self.total_requests = len(requests)
         self.progress_bar = tqdm(
             total=self.total_requests, desc="Progress", unit="event")
 
+    def _initialize_cluster_state(
+        self,
+        model_config: ModelConfig,
+        prefill_config: List[Tuple],
+        decode_config: List[Tuple],
+        ttft_slo: float,
+        tpot_slo: float,
+        requests: List[Request]
+    ):
+        prefill_instances: List[ModelInstance] = []
+        decode_instances: List[ModelInstance] = []
+
+        for instance in prefill_config:
+            hardware = instance["hardware"]
+            tp_size = instance["tp_size"]
+            memory_limit = hardware_params[instance["hardware"]]["mem"] - \
+                model_config.model_size_byte / instance["tp_size"]
+            prefill_instances.append(
+                ModelInstance(hardware, tp_size, memory_limit)
+            )
+
+        for instance in decode_config:
+            hardware = instance["hardware"]
+            tp_size = instance["tp_size"]
+            memory_limit = hardware_params[instance["hardware"]]["mem"] - \
+                model_config.model_size_byte / instance["tp_size"]
+            decode_instances.append(
+                ModelInstance(hardware, tp_size, memory_limit)
+            )
+
+        for instance in prefill_instances:
+            assert instance.memory_limit > 0
+        for instance in decode_instances:
+            assert instance.memory_limit > 0
+
+        # Convert requests list to dict for fast lookup
+        requests_dict = {req.idx: req for req in requests}
+
+        return ClusterState(
+            model_config=model_config,
+            prefill_instances=prefill_instances,
+            decode_instances=decode_instances,
+            requests=requests_dict,
+            ttft_slo=ttft_slo,
+            tpot_slo=tpot_slo
+        )
+
+    def _handle_arrival(self, t: float, req_id: int) -> None:
+        req = self.cluster_state.get_request(req_id)
+
+        # Assign model instance
+        assert req.input_length is not None
+        instance_id = self.coordinator.prefill_dispatch(
+            req, self.cluster_state, t)
+        req.prefill_instance = instance_id
+
+        instance = self.cluster_state.get_prefill_instance(instance_id)
+        assert instance is not None
+
+        # TODO: batch size > 1 for prefill inference
+        req.prefill_time = self.analyzer.profile_prefill_iteration(
+            instance.hardware, req.input_length, 1,
+            self.cluster_state.model_config.w_bit, self.cluster_state.model_config.a_bit,
+            self.cluster_state.model_config.kv_bit, self.cluster_state.model_config.use_flashattention,
+            instance.tp_size)
+
+        if not instance.busy:
+            req.prefill_start = t
+            req.prefill_finish = t + req.prefill_time
+            instance.busy = True
+            instance.running_requests = [req]
+            instance.finish_time = req.prefill_finish
+            self.engine.add_event(
+                (req.prefill_finish, "prefill_finish", instance_id))
+        else:
+            instance.queue.append(req)
+
+    def _handle_prefill_finish(self, t: float, instance_id: int) -> None:
+        instance = self.cluster_state.get_prefill_instance(instance_id)
+        finished_request = instance.running_requests[0]
+        assert finished_request is not None
+
+        if finished_request.prefill_finish is None:
+            raise ValueError(
+                f"prefill of {finished_request.idx} not finished")
+
+        finished_request.kv_transmission_finish = (
+            finished_request.prefill_finish +
+            finished_request.input_length *
+            self.cluster_state.model_config.per_token_kv_cache_size_byte /
+            self.cluster_state.model_config.kv_cache_transmission_speed
+        )
+
+        self.engine.add_event(
+            (finished_request.kv_transmission_finish, "kv_transmission_finish", finished_request.idx))
+
+        instance.busy = False
+        instance.running_requests.pop(0)
+
+        # Dispatch next if any
+        if instance.queue:
+            if self.sample_queue_states and self.rng.random() < self.sample_rate:
+                queue = [request for request in instance.queue]
+                self.queue_states.append(QueueState(
+                    timestamp=t,
+                    instance_id=instance_id,
+                    instance_group='prefill',
+                    queue=queue
+                ))
+
+            next_req = self.coordinator.prefill_schedule(
+                instance.queue, instance_id, self.cluster_state, t)
+
+            next_req.prefill_time = self.analyzer.profile_prefill_iteration(
+                instance.hardware, next_req.input_length, 1,
+                self.cluster_state.model_config.w_bit, self.cluster_state.model_config.a_bit,
+                self.cluster_state.model_config.kv_bit, self.cluster_state.model_config.use_flashattention,
+                instance.tp_size)
+
+            next_req.prefill_start = t
+            next_req.prefill_finish = t + next_req.prefill_time
+            instance.busy = True
+            instance.running_requests = [next_req]
+            instance.finish_time = next_req.prefill_finish
+            self.engine.add_event(
+                (next_req.prefill_finish, "prefill_finish", instance_id))
+
+    def _handle_kv_transmission_finish(self, t: float, req_id: int) -> None:
+        req = self.cluster_state.get_request(req_id)
+
+        instance_id = self.coordinator.decode_dispatch(
+            req, self.cluster_state, t)
+        req.decode_instance = instance_id
+        instance = self.cluster_state.get_decode_instance(instance_id)
+        assert instance is not None
+
+        if not instance.busy:
+            iteration_time = self.analyzer.profile_decode_iteration(
+                instance.hardware, req.input_length, 1,
+                self.cluster_state.model_config.w_bit, self.cluster_state.model_config.a_bit,
+                self.cluster_state.model_config.kv_bit, self.cluster_state.model_config.use_flashattention,
+                instance.tp_size
+            )
+            req.decode_start = t
+            instance.busy = True
+            instance.running_requests = [req]
+            self.engine.add_event(
+                (t + iteration_time, "decode_step", instance_id))
+        else:
+            instance.queue.append(req)
+
+    def _handle_decode_step(self, t: float, instance_id: int) -> None:
+        instance = self.cluster_state.get_decode_instance(instance_id)
+
+        finished = []
+        for index, request in enumerate(instance.running_requests):
+            request.decode_steps += 1
+            if request.decode_steps == request.output_length:
+                finished.append(index)
+                request.decode_finish = t
+
+                # Update progress bar
+                if request.idx > self.max_decode_finished_id:
+                    self.progress_bar.update(
+                        request.idx - self.max_decode_finished_id)
+                    self.max_decode_finished_id = request.idx
+
+        for index in sorted(finished, reverse=True):
+            instance.running_requests.pop(index)
+
+        memory_usage = 0
+        for request in instance.running_requests:
+            memory_usage += (request.input_length +
+                             request.decode_steps) * self.cluster_state.model_config.per_token_kv_cache_size_byte
+
+        if self.sample_memory_usage:
+            if self.rng.random() < self.sample_rate:
+                self.memory_usage_samples.append(MemoryUsageSample(
+                    timestamp=t,
+                    instance_id=instance_id,
+                    instance_group='decode',
+                    memory_usage=memory_usage / instance.memory_limit
+                ))
+
+        # FIXME: If memory is saturated, evict all of them
+        if memory_usage > instance.memory_limit:
+            for request in instance.running_requests:
+                request.input_length = request.input_length + request.decode_steps
+                request.output_length = request.output_length - request.decode_steps
+                request.decode_steps = 0
+                instance.queue.append(request)
+            instance.running_requests.clear()
+            instance.busy = False
+            instance.memory_usage = 0
+        else:
+            instance.memory_usage = memory_usage
+
+        if instance.queue:
+            next_requests = self.coordinator.decode_schedule(
+                instance.queue, instance_id, self.cluster_state, t)
+
+            for request in next_requests:
+                request.decode_start = t
+                request.decode_instance = instance_id
+            instance.busy = True
+            instance.running_requests += next_requests
+
+        if len(instance.running_requests) == 0:
+            instance.busy = False
+            return
+
+        padded_sequence_len = max(list(map(lambda request: (
+            request.input_length + request.decode_steps), instance.running_requests)))
+
+        iteration_time = self.analyzer.profile_decode_iteration(
+            instance.hardware, padded_sequence_len, len(
+                instance.running_requests),
+            self.cluster_state.model_config.w_bit, self.cluster_state.model_config.a_bit,
+            self.cluster_state.model_config.kv_bit, self.cluster_state.model_config.use_flashattention,
+            instance.tp_size)
+
+        next_tick_time = t + iteration_time
+        instance.finish_time = next_tick_time
+
+        self.engine.add_event((next_tick_time, "decode_step", instance_id))
+
     def run(self) -> None:
-        for t, ev_type, payload in self.context.iter_events():
+        for t, ev_type, payload in self.engine:
             logging.info(f"{t} {ev_type} {payload}")
-            instance: ModelInstance | None = None
 
             if ev_type == "arrival":
-                req_id = payload
-                req = self.context.requests[req_id]
-
-                # Assign model instance
-                assert req.input_length is not None
-                instance_id = self.coordinator.prefill_dispatch(
-                    req, self.context)
-                req.prefill_instance = instance_id
-
-                instance = self.context.prefill_instances[instance_id]
-                assert instance is not None
-
-                # TODO: batch size > 1 for prefill inference
-                req.prefill_time = self.analyzer.analyze_prefill_iteration(
-                    instance.hardware, req.input_length, 1, self.context.model_config.w_bit, self.context.model_config.a_bit, self.context.model_config.kv_bit, self.context.model_config.use_flashattention, instance.tp_size)
-
-                if not instance.busy:
-                    req.prefill_start = t
-                    req.prefill_finish = t + req.prefill_time
-                    instance.busy = True
-                    instance.running_requests = [req]
-                    instance.finish_time = req.prefill_finish
-                    self.context.add_event(
-                        (req.prefill_finish, "prefill_finish", instance_id))
-                else:
-                    # enqueue
-                    instance.queue.append(req)
-
+                self._handle_arrival(t, payload)
             elif ev_type == "prefill_finish":
-                instance_id = payload
-                instance = self.context.prefill_instances[instance_id]
-                finished_request = instance.running_requests[0]
-                assert finished_request is not None
-
-                if finished_request.prefill_finish is None:
-                    raise ValueError(
-                        f"Prefill finish is None for request {finished_request.idx}")
-
-                finished_request.kv_transmission_finish = finished_request.prefill_finish + finished_request.input_length * \
-                    self.context.model_config.per_token_kv_cache_size_byte / \
-                    self.context.model_config.kv_cache_transmission_speed
-
-                self.context.add_event(
-                    (finished_request.kv_transmission_finish, "kv_transmission_finish", finished_request.idx))
-
-                instance.busy = False
-                instance.running_requests.pop(0)
-
-                # Dispatch next if any
-                if instance.queue:
-                    if self.sample_queue_states and self.rng.random() < self.sample_rate:
-                        queue = [request for request in instance.queue]
-                        self.queue_states.append(QueueState(
-                            timestamp=t,
-                            instance_id=instance_id,
-                            instance_group='prefill',
-                            queue=queue
-                        ))
-
-                    debug_len_before = len(instance.queue)
-                    next_req = self.coordinator.prefill_schedule(
-                        instance.queue, self.context)
-                    debug_len_after = len(instance.queue)
-                    assert debug_len_before == debug_len_after + \
-                        1, f"{debug_len_before}, {debug_len_after}"
-
-                    next_req.prefill_time = self.analyzer.analyze_prefill_iteration(
-                        instance.hardware, next_req.input_length, 1, self.context.model_config.w_bit, self.context.model_config.a_bit, self.context.model_config.kv_bit, self.context.model_config.use_flashattention, instance.tp_size)
-
-                    next_req.prefill_start = t
-                    next_req.prefill_finish = t + next_req.prefill_time
-                    instance.busy = True
-                    instance.running_requests = [next_req]
-                    instance.finish_time = next_req.prefill_finish
-                    self.context.add_event(
-                        (next_req.prefill_finish, "prefill_finish", instance_id))
-
+                self._handle_prefill_finish(t, payload)
             elif ev_type == "kv_transmission_finish":
-                req_id = payload
-                req = self.context.requests[req_id]
-
-                instance_id = self.coordinator.decode_dispatch(
-                    req, self.context)
-                req.decode_instance = instance_id
-                instance = self.context.decode_instances[instance_id]
-                assert instance is not None
-
-                if not instance.busy:
-                    iteration_time = self.analyzer.analyze_decode_iteration(
-                        instance.hardware, req.input_length, 1, self.context.model_config.w_bit, self.context.model_config.a_bit, self.context.model_config.kv_bit, self.context.model_config.use_flashattention, instance.tp_size
-                    )
-                    req.decode_start = t
-                    instance.busy = True
-                    instance.running_requests = [req]
-                    self.context.add_event(
-                        (t + iteration_time, "decode_step", instance_id))
-                else:
-                    # enqueue
-                    instance.queue.append(req)
+                self._handle_kv_transmission_finish(t, payload)
             elif ev_type == "decode_step":
-                instance_id = payload
-                instance = self.context.decode_instances[instance_id]
+                self._handle_decode_step(t, payload)
 
-                # (continuous batching) first check if any requests have finished
-                finished = []
-                for index, request in enumerate(instance.running_requests):
-                    request.decode_steps += 1
-                    if request.decode_steps == request.output_length:
-                        finished.append(index)
-                        request.decode_finish = t
-
-                        # Update progress bar
-                        if request.idx > self.max_decode_finished_id:
-                            self.progress_bar.update(
-                                request.idx - self.max_decode_finished_id)
-                            self.max_decode_finished_id = request.idx
-
-                # (continuous batching) if found finished requests, pop them
-                for index in sorted(finished, reverse=True):
-                    instance.running_requests.pop(index)
-
-                # update memory usage
-                memory_usage = 0
-                for request in instance.running_requests:
-                    memory_usage += (request.input_length +
-                                     request.decode_steps) * self.context.model_config.per_token_kv_cache_size_byte
-
-                # sample memory usage
-                if self.sample_memory_usage:
-                    if self.rng.random() < self.sample_rate:
-                        self.memory_usage_samples.append(MemoryUsageSample(
-                            timestamp=t,
-                            instance_id=instance_id,
-                            instance_group='decode',
-                            memory_usage=memory_usage / instance.memory_limit
-                        ))
-
-                # FIXME: If memory is saturated, evict all of them
-                if memory_usage > instance.memory_limit:
-                    for request in instance.running_requests:
-                        request.input_length = request.input_length + request.decode_steps
-                        request.output_length = request.output_length - request.decode_steps
-                        request.decode_steps = 0
-                        instance.queue.append(request)
-                    instance.running_requests.clear()
-                    instance.busy = False
-                    instance.memory_usage = 0
-                else:
-                    instance.memory_usage = memory_usage
-
-                # (continuous batching) add new requests to the batch
-                if instance.queue:
-                    next_requests = self.coordinator.decode_schedule(
-                        instance.queue, self.context)
-
-                    for request in next_requests:
-                        request.decode_start = t
-                        request.decode_instance = instance_id
-                    instance.busy = True
-                    instance.running_requests += next_requests
-
-                if len(instance.running_requests) == 0:
-                    instance.busy = False
-                    continue
-
-                padded_sequence_len = max(list(map(lambda request: (
-                    request.input_length + request.decode_steps), instance.running_requests)))
-
-                iteration_time = self.analyzer.analyze_decode_iteration(instance.hardware, padded_sequence_len, len(
-                    instance.running_requests), self.context.model_config.w_bit, self.context.model_config.a_bit, self.context.model_config.kv_bit, self.context.model_config.use_flashattention, instance.tp_size)
-
-                next_tick_time = t + iteration_time
-                instance.finish_time = next_tick_time
-
-                self.context.add_event((next_tick_time,
-                                        "decode_step", instance_id))
-
-        # Close progress bar when simulation is complete
         self.progress_bar.close()
 
     def request_df(self) -> pd.DataFrame:
@@ -399,7 +423,7 @@ class Simulator:
                     (r.decode_finish - r.kv_transmission_finish) /
                     r.output_length if r.decode_finish and r.decode_start else np.nan,
                 )
-                for r in self.context.requests
+                for r in self.cluster_state.requests.values()
             ],
             columns=pd.Index([
                 "id",
@@ -424,10 +448,10 @@ class Simulator:
                     q.instance_group,
                     [r.idx for r in q.queue],
                     [r.input_length for r in q.queue],
-                    [r.arrival + self.context.ttft_slo -
+                    [r.arrival + self.cluster_state.ttft_slo -
                         q.timestamp for r in q.queue],
                 )
-                for q in self.context.queue_states
+                for q in self.queue_states
             ],
             columns=pd.Index([
                 "timestamp",

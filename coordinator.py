@@ -1,15 +1,12 @@
-from simulator import Simulator
+from simulator import Simulator, DispatchContext, SchedulingContext, ClusterState
 from typing import List, Dict
-import importlib
-import inspect
-from pathlib import Path
-from policies.base import Policy, LocalPolicy, GlobalPolicy, SchedContext
+from policies.base import Policy
 import logging
 from req import Request
+from extension import PolicyLoader
 
 
 class Coordinator:
-    plugin_dir = 'policies'
 
     def __init__(self, prefill_local: str, prefill_global: str, decode_local: str, decode_global: str, ttft_slo: float, tpot_slo: float, sim: Simulator):
         self.prefill_local = prefill_local
@@ -20,56 +17,59 @@ class Coordinator:
         self.tpot_slo = tpot_slo
         self.sim = sim
 
-        self.policies: Dict[str, Policy] = self._load_plugin()
+        # Use unified extension loader for policies
+        policy_loader = PolicyLoader(logger=logging.getLogger(__name__))
+        self.policies: Dict[str, Policy] = policy_loader.load_extensions()
 
         self.prefill_global_scheduler = self.policies[self.prefill_global]()
         self.prefill_local_scheduler = self.policies[self.prefill_local]()
         self.decode_global_scheduler = self.policies[self.decode_global]()
         self.decode_local_scheduler = self.policies[self.decode_local]()
 
-    def _load_plugin(self):
-        policies = {}
-        plugin_path = Path(self.plugin_dir)
+    def prefill_dispatch(self, request: Request, cluster_state: ClusterState, time: float) -> int:
+        # Create a specific, immutable context for this decision
+        context = DispatchContext(
+            current_time=time,
+            cluster_state=cluster_state,
+            request_to_dispatch=request
+        )
+        return self.prefill_global_scheduler.schedule(context)
 
-        for file in plugin_path.glob("*.py"):
-            # Skip files like __init__.py
-            if file.name.startswith("_"):
-                continue
+    def prefill_schedule(self, queue: List[Request], instance_id: int, cluster_state: ClusterState, time: float) -> Request:
+        context = SchedulingContext(
+            current_time=time,
+            cluster_state=cluster_state,
+            queue=tuple(queue),
+            instance_id=instance_id
+        )
+        # Policy now returns the selected request object directly, not an index
+        selected_request = self.prefill_local_scheduler.schedule(context)
+        # Remove the selected request from the queue
+        queue.remove(selected_request)
+        return selected_request
 
-            # Convert file path to a module path (e.g., 'policies/fifo.py' -> 'policies.fifo')
-            module_name = f"{plugin_path.name}.{file.stem}"
+    def decode_dispatch(self, request: Request, cluster_state: ClusterState, time: float) -> int:
+        context = DispatchContext(
+            current_time=time,
+            cluster_state=cluster_state,
+            request_to_dispatch=request
+        )
+        return self.decode_global_scheduler.schedule(context)
 
-            try:
-                module = importlib.import_module(module_name)
-                for _, obj in inspect.getmembers(module, inspect.isclass):
-                    if issubclass(obj, Policy) and obj is not Policy and obj is not LocalPolicy and obj is not GlobalPolicy:
-                        policies[file.stem] = obj
-                        logging.log(
-                            logging.INFO, f"Discovered plugin: '{file.stem}'")
-
-            except ImportError as e:
-                logging.log(
-                    logging.ERROR, f"Could not import plugin {file.name}: {e}'")
-
-        return policies
-
-    def prefill_dispatch(self, request: Request, context: SchedContext):
-        return self.prefill_global_scheduler.schedule(request, context)
-
-    def prefill_schedule(self, queue: List[Request], context: SchedContext) -> Request:
-        index = self.prefill_local_scheduler.schedule(queue, context)
-        request = queue.pop(index)
-        return request
-
-    def decode_dispatch(self, request: Request, context: SchedContext):
-        return self.decode_global_scheduler.schedule(request, context)
-
-    def decode_schedule(self, queue: List[Request], context: SchedContext):
+    def decode_schedule(self, queue: List[Request], instance_id: int, cluster_state: ClusterState, time: float) -> List[Request]:
         selected = []
-        while context.current_instance.memory_usage < context.current_instance.memory_limit and len(queue) > 0:
-            index = self.decode_local_scheduler.schedule(queue, context)
-            selected.append(queue[index])
-            context.current_instance.memory_usage += queue[index].input_length * \
-                context.model_config.per_token_kv_cache_size_byte
-            queue.pop(index)
+        instance = cluster_state.get_decode_instance(instance_id)
+
+        while instance.memory_usage < instance.memory_limit and len(queue) > 0:
+            context = SchedulingContext(
+                current_time=time,
+                cluster_state=cluster_state,
+                queue=tuple(queue),
+                instance_id=instance_id
+            )
+            selected_request = self.decode_local_scheduler.schedule(context)
+            selected.append(selected_request)
+            instance.memory_usage += selected_request.input_length * \
+                cluster_state.model_config.per_token_kv_cache_size_byte
+            queue.remove(selected_request)
         return selected

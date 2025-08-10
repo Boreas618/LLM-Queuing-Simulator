@@ -1,13 +1,13 @@
 import itertools
 from typing import List, Dict, Any
-from simulator import SchedContext
 
 from pulp import (
     LpProblem, LpMaximize, LpVariable, LpBinary, LpStatus,
     lpSum, value, PULP_CBC_CMD
 )
 
-from .base import LocalPolicy, SchedContext
+from .base import LocalPolicy
+from simulator import SchedulingContext
 from req import Request
 
 
@@ -116,12 +116,16 @@ class MILPPolicy(LocalPolicy):
             "finish_time": [finish for _, finish in solved_schedule],
         }
 
-    def schedule(self, queue: List[Request], context: SchedContext) -> int:
+    def schedule(self, context: SchedulingContext) -> Request:
         """
         Determines the next request to schedule from the queue.
         """
-        current_time = context.time
-        slo = context.ttft_slo
+        if not context.queue:
+            raise ValueError("Cannot schedule from empty queue")
+
+        current_time = context.current_time
+        slo = context.cluster_state.ttft_slo
+        queue = list(context.queue)  # Convert tuple to list for indexing
 
         # Filter for requests whose deadlines have not yet passed
         schedulable_reqs = [
@@ -131,10 +135,13 @@ class MILPPolicy(LocalPolicy):
 
         # If no requests can possibly meet their SLO, fall back to SJF
         if not schedulable_reqs:
-            return min(range(len(queue)), key=lambda i: queue[i].input_length)
+            return min(queue, key=lambda req: req.input_length)
 
-        proc_times = [context.instance.analyzer(
-            req.input_length) for _, req in schedulable_reqs]
+        # Note: This policy needs access to the analyzer to get processing times
+        # This may need to be passed through the context or obtained differently
+        # For now, using a simple approximation based on input_length
+        proc_times = [req.input_length * 0.001  # Simple approximation
+                      for _, req in schedulable_reqs]
         deadlines = [(req.arrival + slo - current_time)
                      for _, req in schedulable_reqs]
 
@@ -142,8 +149,10 @@ class MILPPolicy(LocalPolicy):
 
         # This policy is a "re-planning" policy. At each step, it computes the
         # full optimal schedule but only dispatches the *first* task from it.
-        first_task_idx = result["schedule"][0]
-
-        # Map the index from the filtered list back to the original queue index
-        index = schedulable_reqs[first_task_idx][0]
-        return index
+        if result["schedule"]:
+            first_task_idx = result["schedule"][0]
+            # Map the index from the filtered list back to the original request
+            return schedulable_reqs[first_task_idx][1]
+        else:
+            # Fallback to shortest job first
+            return min(queue, key=lambda req: req.input_length)

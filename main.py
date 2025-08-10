@@ -396,4 +396,4 @@ if __name__ == "__main__":
 
     # Visualize the results
     visualizer = TTFTVisualizer(all_results, raw_df_map)
-    visualizer.plot_ttft_vs_length("figures")
+    visualizer.plot_tpot_vs_length("figures")
